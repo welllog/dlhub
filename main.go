@@ -48,7 +48,11 @@ func main() {
 	fmt.Println("skip: ", *skip)
 	fmt.Println("dir: ", *dir)
 
-	FileBaseDir = strings.TrimRight(*dir, "/") + "/"
+	if *dir == "" || *dir == "." {
+		FileBaseDir = ""
+	} else {
+		FileBaseDir = strings.TrimRight(*dir, "/") + "/"
+	}
 
 	page := 1
 	if *skip > 0 {

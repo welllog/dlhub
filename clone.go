@@ -16,7 +16,10 @@ func Clone(ctx context.Context, proj *Project) error {
 	_, err := os.Stat(path)
 	if err != nil && !os.IsExist(err) {
 		err = os.Mkdir(path, 0755)
-		return err
+		if err != nil {
+			fmt.Println("mkdir err: ", err.Error())
+			return err
+		}
 	}
 
 	Printf("start clone " + proj.Name)
