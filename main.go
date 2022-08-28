@@ -14,23 +14,24 @@ import (
 	"strings"
 	"sync"
 	"syscall"
+	"time"
 )
 
 const (
 	GITHUB_BASE_URL = "https://github.com/search?o=desc&q=%s&s=stars&type=Repositories"
-	PAGE_SIZE = 10
-	GO = "Go"
-	JS = "JavaScript"
-	HTML = "HTML"
-	JAVA = "Java"
-	PYTHON = "Python"
-	CSS = "CSS"
-	PHP = "PHP"
-	TS = "TypeScript"
-	CSHARP = "C#"
-	Ruby = "Ruby"
-	CPP = "C++"
-	C = "C"
+	PAGE_SIZE       = 10
+	GO              = "Go"
+	JS              = "JavaScript"
+	HTML            = "HTML"
+	JAVA            = "Java"
+	PYTHON          = "Python"
+	CSS             = "CSS"
+	PHP             = "PHP"
+	TS              = "TypeScript"
+	CSHARP          = "C#"
+	Ruby            = "Ruby"
+	CPP             = "C++"
+	C               = "C"
 )
 
 func main() {
@@ -67,20 +68,21 @@ func main() {
 	}
 
 	ctx, cancel := context.WithCancel(context.Background())
-	end := make(chan struct{}, 1)
 
 	var w sync.WaitGroup
 	w.Add(1)
 	go func() {
+		var (
+			total, incr, page int
+		)
 		defer w.Done()
-		defer fmt.Println("^ -- ^ ######### complete all")
 		defer func() {
-			end <- struct{}{}
+			fmt.Printf("^ -- ^ ######### complete all; clone count: %d, page: %d \n", incr, page)
 		}()
 
-		var incr int
-		var total int
+		now := time.Now()
 		for {
+			page = pageContent.CurPage
 			for _, v := range pageContent.Projects {
 				total++
 				if total <= *skip {
@@ -88,38 +90,50 @@ func main() {
 				}
 
 				select {
-				case <- ctx.Done():
+				case <-ctx.Done():
 					return
 				default:
 				}
-				_ = Clone(ctx, v)
-				incr++
-				if incr >= *limit {
-					return
+				if err := Clone(ctx, v); err == nil {
+					incr++
+					if incr >= *limit {
+						return
+					}
 				}
 			}
 			if pageContent.TotalPage <= pageContent.CurPage {
 				return
 			}
-			pageContent,err = searchInGithub(*lang, *query, pageContent.CurPage + 1)
-			if err != nil {
-				log.Printf("search github err: " + err.Error())
-				return
+			nextPage := pageContent.CurPage + 1
+			if time.Since(now).Seconds() < 1 {
+				time.Sleep(time.Second)
 			}
-
+			for retry := 0; retry <= 3; retry++ {
+				pageContent, err = searchInGithub(*lang, *query, nextPage)
+				if err == nil {
+					break
+				} else if retry == 3 {
+					log.Printf("search github err: " + err.Error())
+					return
+				} else {
+					log.Printf("search github err: " + err.Error())
+					time.Sleep(2 * time.Second)
+				}
+			}
+			now = time.Now()
 		}
 
 	}()
 
+	go func() {
+		quit := make(chan os.Signal, 1)
+		signal.Notify(quit, syscall.SIGINT, syscall.SIGTERM)
+		<-quit
+		cancel()
+	}()
 
-	quit := make(chan os.Signal, 1)
-	signal.Notify(quit, syscall.SIGINT, syscall.SIGTERM)
-	select {
-	case <- quit:
-	case <- end:
-	}
-	cancel()
 	w.Wait()
+	cancel()
 }
 
 func searchInGithub(language, query string, page int) (*GitHubPage, error) {
