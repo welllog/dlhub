@@ -11,6 +11,7 @@
 - dir 保存目录
 - skip 跳过前面一定数量的项目
 - limit 限制下载的项目数量
+- do 行为，[clone|pull]克隆或更新
 
 #### 补充
 搜索按 most stars 降序
