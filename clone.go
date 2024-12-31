@@ -4,46 +4,42 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"github.com/go-git/go-git/v5"
 	"io/fs"
-	"log"
 	"net/http"
 	"net/url"
 	"os"
 	"path/filepath"
 	"strconv"
+	"log/slog"
 	"strings"
+
+	"github.com/go-git/go-git/v5"
+	"github.com/go-git/go-git/v5/plumbing/transport"
+	"github.com/welllog/golib/setz"
+	"github.com/welllog/golib/slicez"
 )
 
-var FileBaseDir string
-
 func Clone(ctx context.Context, proj *Project) error {
-	path := FileBaseDir + proj.Language
-	_, err := os.Stat(path)
-	if err != nil && !os.IsExist(err) {
-		err = os.MkdirAll(path, os.ModeDir)
-		if err != nil {
-			fmt.Println("mkdir err: ", err.Error())
-			return err
+	path := FileBaseDir
+
+	cloneConfig := &git.CloneOptions{
+		URL:      proj.Uri,
+		Progress: Screen,
+	}
+	if proxy := os.Getenv("https_proxy"); proxy != "" {
+		slog.Info("use proxy", slog.String("proxy", proxy))
+		cloneConfig.ProxyOptions = transport.ProxyOptions{
+			URL: proxy,
 		}
 	}
 
-	log.Printf("start clone " + proj.Name)
-	names := strings.Split(proj.Name, "/")
-	lname := len(names)
-	_, err = git.PlainCloneContext(ctx, path+"/"+names[lname-1], false, &git.CloneOptions{
-		URL:      proj.Uri,
-		Progress: Screen,
-	})
-	//cmd := exec.Command("/usr/bin/git clone", proj.Uri, path + "/" + proj.Name)
-	//cmd.Stdout = os.Stdout
-	//cmd.Stderr = os.Stdout
-	//err = cmd.Run()
+	slog.Info("start clone " + proj.Name)
+	_, err := git.PlainCloneContext(ctx, filepath.Join(path, proj.Name), false, cloneConfig)
 	if err != nil {
-		log.Printf("clone " + proj.Name + " err: " + err.Error())
+		slog.Error("clone failed", slog.String("project", proj.Name), slog.String("err", err.Error()))
 		return err
 	}
-	log.Printf("complete clone " + proj.Name)
+	slog.Info("complete clone " + proj.Name)
 
 	file, err := os.OpenFile(path+"/projects.md", os.O_RDWR|os.O_APPEND|os.O_CREATE, 0755)
 	if err != nil {
@@ -52,32 +48,32 @@ func Clone(ctx context.Context, proj *Project) error {
 
 	defer file.Close()
 
-	var content strings.Builder
-	content.WriteString("> ### ")
-	content.WriteString(proj.Name)
-	content.WriteString("\n")
-	content.WriteString("> ###### ")
-	content.WriteString(proj.Desc)
-	content.WriteString("\n")
-	content.WriteString("> ")
+	buf.Reset()
+	buf.WriteString("> ### ")
+	buf.WriteString(proj.Name)
+	buf.WriteString("\n")
+	buf.WriteString("> ###### ")
+	buf.WriteString(proj.Desc)
+	buf.WriteString("\n")
+	buf.WriteString("> ")
 	for _, v := range proj.Keys {
-		content.WriteString("``")
-		content.WriteString(v)
-		content.WriteString("`` ")
+		buf.WriteString("``")
+		buf.WriteString(v)
+		buf.WriteString("`` ")
 	}
-	content.WriteString("\n")
-	content.WriteString("> \n")
-	content.WriteString("> - star: ")
-	content.WriteString(proj.Star)
-	content.WriteString("\n")
-	content.WriteString("> - language: ")
-	content.WriteString(proj.Language)
-	content.WriteString("\n")
-	content.WriteString("> - updated: ")
-	content.WriteString(proj.UpdateAt)
-	content.WriteString("\n\n")
+	buf.WriteString("\n")
+	buf.WriteString("> \n")
+	buf.WriteString("> - star: ")
+	buf.WriteString(proj.Star)
+	buf.WriteString("\n")
+	buf.WriteString("> - language: ")
+	buf.WriteString(proj.Language)
+	buf.WriteString("\n")
+	buf.WriteString("> - updated: ")
+	buf.WriteString(proj.UpdateAt)
+	buf.WriteString("\n\n")
 
-	file.WriteString(content.String())
+	file.WriteString(buf.String())
 
 	return nil
 }
@@ -114,63 +110,44 @@ func searchInGithub(language, query string, page int) (*GitHubPage, error) {
 	return ParseHtml(rsp.Body)
 }
 
-func filterGithubPage(g *GitHubPage, existsRepos map[string]struct{}) {
-	var remain int
-	for i, v := range g.Projects {
-		index := strings.Index(v.Name, "/")
-		if index > 0 {
-			repo := v.Name[index+1:]
-			if _, ok := existsRepos[repo]; !ok {
-				g.Projects[i], g.Projects[remain] = g.Projects[remain], g.Projects[i]
-				remain++
-			}
-		}
-	}
-	g.Projects = g.Projects[:remain]
+func filterGithubPage(g *GitHubPage, existsRepos setz.Set[string]) {
+	g.Projects = slicez.FilterInPlace(g.Projects, func(p *Project) bool {
+		return !existsRepos.Has(p.Name)
+	})
 }
 
-func loadExistsRepo(ctx context.Context) (map[string]struct{}, error) {
-	m := make(map[string]struct{}, 10000)
-	err := filepath.WalkDir(FileBaseDir, func(path string, d fs.DirEntry, err error) error {
+func loadExistsRepo(ctx context.Context, dir string) (setz.Set[string], error) {
+	set := make(setz.Set[string], 10000)
+	err := filepath.WalkDir(dir, func(path string, d fs.DirEntry, err error) error {
 		if err != nil {
-			if strings.Contains(err.Error(), "no such file or directory") {
-				return nil
-			}
 			return err
+		}
+
+		if path == dir {
+			return nil
 		}
 
 		if isCancel(ctx) {
 			return ctx.Err()
 		}
 
-		if d.Name() == ".git" {
-			repoPath := filepath.Dir(path)
-
-			repo, err := git.PlainOpen(repoPath)
-			if err != nil {
-				return err
+		suffix := strings.TrimPrefix(path, dir)
+		suffix = strings.TrimPrefix(suffix, "/")
+		if strings.Count(suffix, "/") == 1 {
+			if d.IsDir() {
+				set.Add(suffix)
+				slog.Debug("load exists repo", slog.String("name", suffix))
+				return filepath.SkipDir
 			}
-
-			// 获取仓库名称
-			remotes, err := repo.Remotes()
-			if err != nil {
-				return err
-			}
-			name := remotes[0].Config().URLs[0]
-			index := strings.LastIndex(name, "/")
-			if index > 0 {
-				name = name[index+1:]
-				name = strings.TrimSuffix(name, ".git")
-				m[name] = struct{}{}
-			}
-
-			return filepath.SkipDir
 		}
+
 		return nil
 	})
+
 	if err != nil {
-		log.Printf("filepath.WalkDir() returned %v\n", err)
+		slog.Error("load exists repo failed", slog.String("err", err.Error()))
 		return nil, err
 	}
-	return m, nil
+
+	return set, nil
 }

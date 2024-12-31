@@ -1,9 +1,10 @@
 package main
 
 import (
+	"bytes"
 	"context"
 	"flag"
-	"fmt"
+	"log/slog"
 	"os"
 	"os/signal"
 	"strings"
@@ -32,28 +33,30 @@ var (
 	lang  = flag.String("lang", "", "query language")
 	query = flag.String("query", "go", "query words")
 	limit = flag.Int("limit", 50, "clone projects limit")
-	skip  = flag.Int("skip", 0, "clone skip")
 	dir   = flag.String("dir", "", "dir")
 	do    = flag.String("do", "pull", "do something like clone or pull")
+)
+
+var (
+	FileBaseDir string
+	buf         bytes.Buffer
 )
 
 func main() {
 	flag.Parse()
 
-	fmt.Println("language: ", *lang)
-	fmt.Println("query: ", *query)
-	fmt.Println("limit: ", *limit)
-	fmt.Println("skip: ", *skip)
-	fmt.Println("dir: ", *dir)
-	fmt.Println("do: ", *do)
+	slog.Info("",
+		slog.String("lang", *lang),
+		slog.String("query", *query),
+		slog.Int("limit", *limit),
+		slog.String("dir", *dir),
+		slog.String("do", *do),
+	)
+	slog.SetLogLoggerLevel(slog.LevelDebug)
 
-	if *dir == "" || *dir == "." {
-		FileBaseDir = ""
-	} else {
-		FileBaseDir = strings.TrimRight(*dir, "/") + "/"
-	}
-
+	FileBaseDir = strings.TrimPrefix(*dir, "./")
 	ctx, cancel := context.WithCancel(context.Background())
+
 	var w sync.WaitGroup
 
 	switch *do {
